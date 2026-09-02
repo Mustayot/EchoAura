@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live2D 语音对话</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- frameless 自绘标题栏：拖拽区（.pywebview-drag-region）+ 图标 + —/✕ 按钮 -->
+  <div id="titlebar" class="pywebview-drag-region">
+    <img id="titlebar-icon" src="/favicon.ico" alt="" draggable="false">
+    <div id="titlebar-btns">
+      <button id="titlebar-min" title="最小化" aria-label="最小化">—</button>
+      <button id="titlebar-close" title="关闭" aria-label="关闭">✕</button>
+    </div>
+  </div>
+
+  <!-- Live2D 模型舞台（全窗口，CSS 渐变做背景） -->
+  <div id="stage"></div>
+
+  <!-- 顶部状态栏 -->
+  <div id="topbar">
+    <div id="status">
+      <span class="dot" id="dot-llm">LLM</span>
+      <span class="dot" id="dot-tts">TTS</span>
+      <span class="dot" id="dot-stt">STT</span>
+    </div>
+    <!-- 回复语言徽章：显示当前生效语言，改下拉即时更新 -->
+    <span id="lang-badge" title="当前回复语言（在高级配置里切换）"></span>
+    <!-- 右上角：高级配置按钮（与右下角齿轮不同，滑块图标） -->
+    <button id="cfg-open" title="高级配置" aria-label="高级配置">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+        <line x1="4" y1="6" x2="20" y2="6"/><circle cx="15" cy="6" r="2.4" fill="var(--accent)" stroke="var(--accent)"/>
+        <line x1="4" y1="12" x2="20" y2="12"/><circle cx="9" cy="12" r="2.4" fill="var(--accent)" stroke="var(--accent)"/>
+        <line x1="4" y1="18" x2="20" y2="18"/><circle cx="17" cy="18" r="2.4" fill="var(--accent)" stroke="var(--accent)"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- 左侧聊天面板 -->
+  <div id="panel">
+    <div id="chat"></div>
+    <div id="input-row">
+      <input id="input" type="text" placeholder="加载中…" autocomplete="off" disabled>
+      <button id="btn-send" disabled>发送</button>
+    </div>
+    <div id="btn-row">
+      <button id="btn-talk" disabled>🎤 按住说话</button>
+      <button id="btn-call" disabled title="语音通话模式：直接说话它立刻语音回复，不显示文字">📞 通话</button>
+      <button id="btn-test" disabled>🔊 测试</button>
+    </div>
+  </div>
+
+  <!-- 右下角齿轮按钮 + 设置面板 -->
+  <button id="btn-settings" title="设置">⚙</button>
+  <div id="settings-panel" class="hidden">
+    <div class="sp-title">⚙ 设置</div>
+    <div class="sp-row">
+      <span>滚轮缩放</span>
+      <input type="checkbox" id="sp-zoom" checked>
+    </div>
+    <div class="sp-row">
+      <span>拖动模型</span>
+      <input type="checkbox" id="sp-drag" checked>
+    </div>
+    <div class="sp-row">
+      <span>模型大小</span>
+      <input type="range" id="sp-scale" min="0.3" max="2.0" step="0.05">
+    </div>
+    <div class="sp-row">
+      <span>模型</span>
+      <div class="sp-model-group">
+        <div id="sp-model"></div>
+        <button id="sp-model-refresh" class="sp-refresh" title="刷新模型列表">↻</button>
+      </div>
+    </div>
+    <button id="sp-clear" class="sp-clear">清空聊天记录</button>
+    <div class="sp-btns">
+      <button id="sp-reset">重置</button>
+      <button id="sp-close">关闭</button>
+    </div>
+  </div>
+
+  <!-- 右下角提示 -->
+  <div id="toast" class="hidden"></div>
+
+  <!-- 右上角高级配置面板（写 config.py，重启生效） -->
+  <div id="cfg-panel" class="hidden">
+    <div class="cfg-title">✦ 高级配置</div>
+    <div class="cfg-hint">修改会写入 config.py，重启程序后生效</div>
+
+    <div class="cfg-section">回复语言</div>
+    <label class="cfg-label">选择回复语言（立即生效，无需重启）</label>
+    <div id="cfg-lang-host"></div>
+
+    <div class="cfg-section">LLM 设置</div>
+    <label class="cfg-label" for="cfg-llm-url">LLM 服务地址（LM Studio / Ollama）</label>
+    <input id="cfg-llm-url" class="cfg-input" type="text" placeholder="http://localhost:1234/v1（LM Studio）或 http://localhost:11434/v1（Ollama）">
+    <label class="cfg-label" for="cfg-llm-model">模型名</label>
+    <div id="cfg-llm-model"></div>
+
+    <div class="cfg-section">TTS 设置</div>
+    <label class="cfg-label" for="cfg-tts-url">GPT-SoVITS 地址</label>
+    <input id="cfg-tts-url" class="cfg-input" type="text" placeholder="http://127.0.0.1:9880">
+    <label class="cfg-label" for="cfg-tts-ref">参考音频路径</label>
+    <input id="cfg-tts-ref" class="cfg-input" type="text" placeholder="D:\...\ref.wav">
+    <label class="cfg-label" for="cfg-tts-prompt">提示文本（须与参考音频一致）</label>
+    <textarea id="cfg-tts-prompt" class="cfg-input" rows="3"></textarea>
+
+    <div class="cfg-section">GPT-SoVITS 模型选择</div>
+    <label class="cfg-label" for="cfg-models-dir">模型文件夹路径（填后点"扫描"自动识别）</label>
+    <div class="cfg-dir-row">
+      <input id="cfg-models-dir" class="cfg-input" type="text" placeholder="D:\..." title="GPT-SoVITS 模型文件夹，含 *.ckpt + *.pth 的子文件夹">
+      <button id="cfg-scan-models" class="cfg-scan-btn" type="button">扫描</button>
+    </div>
+    <div id="cfg-models-status" class="cfg-models-status"></div>
+    <div id="cfg-models-list" class="cfg-models-list"></div>
+
+    <div class="cfg-section">STT 设置</div>
+    <label class="cfg-label" for="cfg-stt-url">STT 服务地址（可只填端口号）</label>
+    <input id="cfg-stt-url" class="cfg-input" type="text" placeholder="http://127.0.0.1:9988/transcribe 或 9988">
+    <label class="cfg-label" for="cfg-stt-stream-url">STT 流式模型地址（语音通话用，可只填端口号）</label>
+    <input id="cfg-stt-stream-url" class="cfg-input" type="text" placeholder="http://127.0.0.1:9989/transcribe_stream 或 9989">
+
+    <div class="cfg-section">长期记忆</div>
+    <button id="mem-toggle" class="mem-toggle" type="button" title="查看或管理已记住的信息">
+      🧠 记忆 <span id="mem-count" class="mem-count">…</span>
+    </button>
+    <div id="mem-body" class="mem-body hidden">
+      <div id="mem-status" class="mem-status"></div>
+      <div id="mem-list" class="mem-list"></div>
+      <div class="mem-btns">
+        <button id="mem-refresh" class="mem-btn">刷新</button>
+        <button id="mem-clear" class="mem-btn mem-btn-danger">清空全部</button>
+      </div>
+    </div>
+
+    <div id="cfg-msg"></div>
+    <div class="cfg-btns">
+      <button id="cfg-save">保存</button>
+      <button id="cfg-close">关闭</button>
+    </div>
+  </div>
+
+  <!-- 自定义确认弹窗（白粉毛玻璃风格，替代默认灰色 confirm） -->
+  <div id="mem-confirm" class="mem-confirm hidden">
+    <div class="mem-confirm-box">
+      <div class="mem-confirm-title">清空全部记忆</div>
+      <div class="mem-confirm-text">确定清空全部记忆？此操作不可恢复。</div>
+      <div class="mem-confirm-btns">
+        <button id="mem-confirm-cancel" class="mem-confirm-btn mem-confirm-cancel" type="button">取消</button>
+        <button id="mem-confirm-ok" class="mem-confirm-btn mem-confirm-ok" type="button">清空</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- frameless 窗口四角缩放手柄（右上角有 ✕ 关闭键，不做手柄；其余三角可拖拽缩放） -->
+  <div id="resize-handle" class="resize-handle resize-se" data-fix="nw" title="拖动调整窗口大小"></div>
+  <div id="resize-handle-sw" class="resize-handle resize-sw" data-fix="ne" title="拖动调整窗口大小"></div>
+  <div id="resize-handle-nw" class="resize-handle resize-nw" data-fix="se" title="拖动调整窗口大小"></div>
+
+  <!-- Live2D 运行库（顺序不能乱） -->
+  <script src="lib/live2dcubismcore.min.js"></script>
+  <script src="lib/pixi.min.js"></script>
+  <script src="lib/cubism4.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
