@@ -2,7 +2,7 @@
 # LM Studio：http://localhost:1234/v1；Ollama：http://localhost:11434/v1
 LM_STUDIO_BASE_URL = "http://localhost:1234/v1"
 # 留空 = 自动用第一个可用模型
-LM_MODEL = "mistralai/ministral-3-3b"
+LM_MODEL = ""
 # 0 最严谨，1.5 最放飞，一般 0.7
 LM_TEMPERATURE = 0.7
 LM_MAX_HISTORY = 20
@@ -35,15 +35,6 @@ STT_API_RESPONSE_FIELD = "text"
 STT_API_TIMEOUT = 30
 
 VAD_SILENCE_TIMEOUT_MS = 2500
-
-# 以下为内置 whisper 后端（STT_BACKEND="whisper"）的参数
-HF_ENDPOINT = "https://hf-mirror.com"
-STT_MODEL_SIZE = "turbo"
-STT_DEVICE = "cuda"
-STT_COMPUTE_TYPE = "float16"
-STT_LANGUAGE = "zh"
-STT_SAMPLE_RATE = 16000
-STT_RECORD_MAX_SECONDS = 20
 
 PERSONA_NAME = "01"
 PERSONA_SYSTEM_PROMPT = (
