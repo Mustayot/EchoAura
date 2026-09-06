@@ -73,6 +73,51 @@ def synthesize(gpt_sovits_url: str, text: str,
         raise RuntimeError(f"TTS 合成失败（HTTP {resp.status_code}）：{resp.text[:300]}")
     return resp.content
 
+# IndexTTS2 情绪向量固定顺序：[happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]
+_EMO_INDEX = {
+    "happy": 0, "angry": 1, "sad": 2, "afraid": 3,
+    "disgusted": 4, "melancholic": 5, "surprised": 6, "calm": 7,
+}
+
+def emo_vector_from_config(emo: str, strength: float) -> list[float]:
+    """把「情绪名 + 强度」映射成 IndexTTS2 的 8 维情绪向量。
+
+    emo        : 标准情绪名（happy/angry/sad/afraid/disgusted/melancholic/surprised/calm/neutral）
+    strength   : 强度 0~1（对应 emo_alpha 语义；向量该项 = strength，其余 0）
+    未知/neutral -> 全 0（不引导情绪，纯靠文本）。
+    """
+    strength = max(0.0, min(1.0, float(strength)))
+    vec = [0.0] * 8
+    key = (emo or "").lower()
+    if key in _EMO_INDEX and key != "neutral":
+        vec[_EMO_INDEX[key]] = strength
+    return vec
+
+
+def synthesize_indextts(base_url: str, text: str, ref_audio_path: str,
+                        lang: str = "ZH", emo_vector=None, emo_alpha: float = 1.0,
+                        timeout: float = 300.0) -> bytes:
+    """调 IndexTTS2 薄 API（api_server.py）合成 wav 字节。失败抛 RuntimeError。"""
+    if not text or not text.strip():
+        raise ValueError("要合成的文本不能为空")
+
+    payload = {
+        "text": text,
+        "ref_audio_path": ref_audio_path,
+        "lang": lang,
+        "emo_vector": emo_vector,
+        "emo_alpha": emo_alpha,
+    }
+    try:
+        resp = requests.post(f"{base_url}/tts", json=payload, timeout=timeout)
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(
+            f"连不上 IndexTTS2（{base_url}）。请确认已运行 uv run api_server.py（D:\\AI\\IndexTTS2）"
+        ) from e
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"IndexTTS 合成失败（HTTP {resp.status_code}）：{resp.text[:300]}")
+    return resp.content
 
 def wav_bytes_to_array(wav_bytes: bytes) -> tuple[np.ndarray, int]:
     """把 wav 字节解析成 (float32 单声道音频数组, 采样率)，用于 sounddevice 播放。"""
