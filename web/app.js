@@ -59,6 +59,19 @@ function resolveEmotion(emotion) {
   return null;
 }
 
+function resolveEmotionForTouch(emotion) {
+  if (!emotion || emotion === "neutral") return null;
+  const lower = String(emotion).toLowerCase();
+  // 1) 标准情绪名 → 映射
+  if (EMOTION_MAP[lower] || EMOTION_MAP[emotion]) {
+    const mapped = resolveEmotion(emotion);
+    if (mapped) return mapped;
+  }
+  
+  if (AVAILABLE_EXPRESSIONS.indexOf(emotion) >= 0) return emotion;
+  return null;
+}
+
 // 从文本抹掉 [EMO: x] 及任何残缺形式（[EM / [EMO / [EMO: 缺 ]）。
 // 两道：先去含 ] 的（含]残缺也去），再去串尾孤立的 [EM 碎片（无]才到串尾）。
 function stripEmo(text) {
@@ -127,13 +140,8 @@ function playEmotion(emotion) {
     if (typeof model.expression === "function") model.expression(name);
     else em.setExpression(name);
     console.log("[表情] 播放：", name, "（情绪", emotion + "）");
-    const hold = window.__EMOTION_HOLD_MS || 0;
-    if (hold > 0) {
-      _emoTimer = setTimeout(() => {
-        try { if (typeof em.resetExpression === "function") em.resetExpression(); } catch (e) {}
-        _emoTimer = null;
-      }, hold);
-    }
+    // 全局 EMOTION_HOLD_MS 的复位交给调用方（触摸用 _touchEmoTimer），这里不再设 _emoTimer，
+    // 避免 resetExpression 产生"僵尸 OBJ"干扰触摸表情生命周期。
   } catch (e) {
     console.warn("[表情播放失败]", name, e);
   }
@@ -273,7 +281,8 @@ function hidePanel(el) {
   el._hideTimer = setTimeout(() => { if (!el.classList.contains("show")) el.classList.add("hidden"); }, 320);
 }
 function anySettingsOpen() {
-  return !$("settings-panel").classList.contains("hidden") || !$("cfg-panel").classList.contains("hidden");
+  return !$("settings-panel").classList.contains("hidden") || !$("cfg-panel").classList.contains("hidden")
+    || !$("index-modal").classList.contains("hidden");
 }
 
 function bindSettingsUI() {
@@ -385,22 +394,257 @@ let _drag = { on: false, sx: 0, sy: 0, px: 0, py: 0 };
 function bindDrag() {
   const el = app.view;
   el.addEventListener("pointerdown", (e) => {
-    if (!S.drag || !model) return;
     _drag.on = true;
     _drag.sx = e.clientX; _drag.sy = e.clientY;
     _drag.px = S.posX;    _drag.py = S.posY;
+    _drag.moved = 0;
     try { el.setPointerCapture(e.pointerId); } catch (err) {}
   });
   el.addEventListener("pointermove", (e) => {
     if (!_drag.on) return;
-    S.posX = Math.min(1.3, Math.max(-0.3, _drag.px + (e.clientX - _drag.sx) / window.innerWidth));
-    S.posY = Math.min(1.3, Math.max(-0.3, _drag.py + (e.clientY - _drag.sy) / window.innerHeight));
+    const dx = e.clientX - _drag.sx, dy = e.clientY - _drag.sy;
+    _drag.moved += Math.abs(dx) + Math.abs(dy);
+    if (S.drag) {
+      S.posX = Math.min(1.3, Math.max(-0.3, _drag.px + dx / window.innerWidth));
+      S.posY = Math.min(1.3, Math.max(-0.3, _drag.py + dy / window.innerHeight));
     saveSettings();
     positionModel();
+    }
   });
-  const end = () => { _drag.on = false; };
+  const end = (e) => {
+    if (_drag.on && _drag.moved < 8) handleModelTap(e);
+    _drag.on = false;
+  };
   el.addEventListener("pointerup", end);
   el.addEventListener("pointercancel", end);
+}
+
+/* ---------------- 触摸反馈：点击模型部位 → 表情 ---------------- */
+let TOUCH_CFG = { enabled: true, holdMs: 3000, responses: {} };
+function setTouchCfg(cfg) {
+  if (!cfg) return;
+  TOUCH_CFG.enabled = !!cfg.TOUCH_ENABLED;
+  if (typeof cfg.TOUCH_HOLD_MS === "number") TOUCH_CFG.holdMs = cfg.TOUCH_HOLD_MS;
+  TOUCH_CFG.responses = cfg.TOUCH_RESPONSES || {};
+}
+// 点击坐标 → 部位。像素级 alpha 检测：先用包围盒快速排除，再 extract.canvas(stage)
+// 离屏渲染当前舞台，读点击点 alpha（<32 = 透明 → 不是人物），头/身分界用同帧
+// 人物像素 bbox 的顶部 25%（包围盒含大片透明，按盒子比例会判空头部）。
+// 坐标系：getBounds() 是逻辑坐标（autoDensity 下 = CSS 像素），与 clientX/Y
+// 同空间直接比，不要 ÷resolution。extract.canvas 像素 = 逻辑单位，原点 = bounds 左上角。
+function hitPartAt(clientX, clientY) {
+  if (!model || !model.getBounds) return null;
+  let b = null;
+  try { b = model.getBounds(); } catch (e) { return null; }
+  const w = b.width, h = b.height;
+  if (w <= 0 || h <= 0) return null;
+  // 快速排除：横向中央 65%（去掉两侧透明边缘）+ 纵向顶部 0~80%（去掉底部裙摆透明）
+  const hLeft = b.x + w * 0.175;
+  const hRight = b.x + w * 0.825;
+  const vTop = b.y;
+  const vBottom = b.y + h * 0.80;
+  if (clientX < hLeft || clientX > hRight ||
+      clientY < vTop || clientY > vBottom) return null;
+  // 像素级 alpha 检测：extract.canvas(stage) → 2D canvas（2D 像素 y 向下，无需翻转）。
+  // canvas 尺寸 = bounds 逻辑尺寸（1px=1逻辑单位），原点 = bounds 左上角。
+  // 同一次快照里：① 点击点透明 → null；② 统计人物像素 bbox → 头/身分界用。
+  let personTop = 0, personBottom = 0;   // 人物实际像素 y（CSS 坐标）
+  try {
+    const ext = app && app.renderer && app.renderer.extract;
+    if (ext && ext.canvas) {
+      const cv = ext.canvas(app.stage);
+      const wpx = cv.width, hpx = cv.height;
+      if (wpx > 0 && hpx > 0) {
+        const ctx2d = cv.getContext('2d', { willReadFrequently: true });
+        const d = ctx2d.getImageData(0, 0, wpx, hpx).data;
+        const px = Math.round(clientX - b.x);
+        const py = Math.round(clientY - b.y);
+        if (px >= 0 && py >= 0 && px < wpx && py < hpx) {
+          if (d[(py * wpx + px) * 4 + 3] < 32) return null;   // 透明背景 → 不是人物
+        }
+        // 统计人物像素 bbox（alpha>32），随当前动作/表情实时更新
+        let pt = hpx - 1, pb = 0, pl = wpx - 1, pr = 0, found = false;
+        for (let yy = 0; yy < hpx; yy++) {
+          const base = yy * wpx * 4;
+          for (let xx = 0; xx < wpx; xx++) {
+            if (d[base + xx * 4 + 3] > 32) {
+              found = true;
+              if (yy < pt) pt = yy;
+              if (yy > pb) pb = yy;
+              if (xx < pl) pl = xx;
+              if (xx > pr) pr = xx;
+            }
+          }
+        }
+        if (found && pb > pt) {
+          personTop = b.y + pt;
+          personBottom = b.y + pb;
+        }
+      }
+    }
+  } catch (e) { /* 读像素失败则退化为包围盒判定 */ }
+  // 头/身判定：优先用人物实际像素 bbox 的顶部 25%（比包围盒比例准，
+  // 不会因包围盒含大片透明导致头部区判空）。退化时用包围盒比例。
+  const headRatio = 0.25;
+  if (personBottom > personTop) {
+    const headBoundary = personTop + (personBottom - personTop) * headRatio;
+    return clientY < headBoundary ? "head" : "body";
+  }
+  if (clientY < vTop + (vBottom - vTop) * headRatio) return "head";
+  return "body";
+}
+/* 触摸表情状态（主循环 stepAnim 用补丁重放参数对抗 loadParameters 擦除） */
+let _touchLastAt = 0;
+let _touchEmoTimer = null;
+// 上一次触摸播放的表情名（连点时避开，保证每次都能换表情）
+let _lastTouchEmo = null;
+let _lastTouchEmoRaw = null;
+let _touchEmoActive = false;
+// 播放前快照所有按钮参数（无默认值，getParameterDefaultValue 返回 NaN，只能靠快照还原）
+let _touchEmoSnapshot = {};
+function snapshotEmotionParams() {
+  _touchEmoSnapshot = {};
+  try {
+    const core = model && model.internalModel && model.internalModel.coreModel;
+    if (!core) return;
+    (core._parameterIds || []).forEach((rawId) => {
+      const id = String(rawId);
+      // 只存触摸表情会改的按钮参数；顺带包含当前表达式声明参数以防万一
+      if (/Button/i.test(id) || (model.internalModel.motionManager.expressionManager.currentExpression
+          && model.internalModel.motionManager.expressionManager.currentExpression._parameters
+          && model.internalModel.motionManager.expressionManager.currentExpression._parameters.some(p => p.parameterId === id))) {
+        try {
+          const v = core.getParameterValueById(id);
+          if (typeof v === "number" && isFinite(v)) _touchEmoSnapshot[id] = v;
+        } catch (e2) { /* 忽略单个参数 */ }
+      }
+    });
+  } catch (e) { /* 忽略 */ }
+}
+function restoreExpressionParams() {
+  try {
+    const em = model && model.internalModel && model.internalModel.motionManager
+               && model.internalModel.motionManager.expressionManager;
+    const core = model && model.internalModel && model.internalModel.coreModel;
+    if (em && core) {
+      // 1) 还原快照基线
+      for (const id of Object.keys(_touchEmoSnapshot)) {
+        try {
+          if ((core._parameterIds || []).indexOf(id) >= 0) {
+            core.setParameterValueById(id, _touchEmoSnapshot[id]);
+          }
+        } catch (e2) { /* 忽略 */ }
+      }
+      // 2) 当前表达式声明但快照没有的参数，反向撤销（Add=减, Multiply=除）
+      const cur = em.currentExpression;
+      if (cur && cur._parameters) {
+        for (const p of cur._parameters) {
+          try {
+            const id = p.parameterId;
+            if ((core._parameterIds || []).indexOf(id) < 0) continue;
+            if (!(id in _touchEmoSnapshot)) {
+              const v = core.getParameterValueById(id);
+              if (typeof v === "number" && isFinite(v)) {
+                const blend = p.blendType || p.blend;   // 0=Add, 1=Multiply
+                const nv = (blend === 1) ? v / Math.max(p.value, 1e-6) : v - (p.value || 0);
+                if (isFinite(nv)) core.setParameterValueById(id, nv);
+              }
+            }
+          } catch (e2) { /* 忽略 */ }
+        }
+      }
+      // 3) 切回默认表达式。绝不调 resetExpression()：它会产生"剩余权重僵尸 OBJ"，
+      //    下一帧 internalModel.update 会无条件应用它把表情打回模型 → 表情永不消失。
+      try {
+        em.currentExpression = em.defaultExpression || null;
+      } catch (e2) { /* 忽略 */ }
+    }
+  } catch (e) { /* 忽略 */ }
+}
+function resetEmotion() {
+  _touchEmoActive = false;   // 先关补丁，防止主循环在恢复前把表情重新打上去
+  restoreExpressionParams();
+}
+// 直接写参数应用表情（绕开 expressionManager 的 fadeIn 链：那些依赖 rAF 逐帧累积，
+// 低帧率/后台环境不可靠，还会被 loadParameters 还原）。按 blend 语义写进 core，立即生效。
+function _applyTouchEmotion(emo) {
+  try {
+    const em = model && model.internalModel && model.internalModel.motionManager
+               && model.internalModel.motionManager.expressionManager;
+    const core = model && model.internalModel && model.internalModel.coreModel;
+    if (!em || !core) return;
+    const name = emo;   // handleModelTap 已把标准情绪映射成模型真实表情名
+    const idx = (em.definitions || []).findIndex((d) => (d.Name || d.name) === name);
+    if (idx < 0) return;
+    const all = em.expressions || [];
+    const exprObj = all[idx] || null;
+    if (!exprObj && typeof em.setExpression === "function") {
+      em.setExpression(name);   // 异步加载；下一帧补丁会再应用
+    }
+    const target = exprObj || all[idx] || null;
+    if (target && target._parameters) {
+      // 幂等应用：先还原快照基线再写目标值，主循环每帧重放不会无限累加（Add 叠加爆炸）
+      try { restoreExpressionParams(); } catch (e2) { /* 忽略 */ }
+      for (const p of target._parameters) {
+        try {
+          const id = p.parameterId;
+          if ((core._parameterIds || []).indexOf(id) < 0) continue;
+          const v = p.value || 0;
+          const base = _touchEmoSnapshot[id] !== undefined ? _touchEmoSnapshot[id] : 0;
+          const blend = p.blendType || p.blend;   // 0=Add, 1=Multiply
+          if (blend === 1) {   // Multiply: 基线 * v
+            core.setParameterValueById(id, base * v);
+          } else {             // Add（含 Overwrite 兜底）: 基线 + v
+            core.setParameterValueById(id, base + v);
+          }
+        } catch (e2) { /* 忽略单个参数 */ }
+      }
+    }
+    try { em.currentExpression = target || em.defaultExpression || null; } catch (e2) {}
+  } catch (e) { /* 忽略 */ }
+}
+
+function handleModelTap(e) {
+  const part = hitPartAt(e.clientX, e.clientY);
+  if (!part || !TOUCH_CFG.enabled) return;
+  const spec = TOUCH_CFG.responses[part];
+  if (!spec) return;
+  const now = Date.now();
+  if (now - _touchLastAt < 600) return;   // 防连点刷屏（0.6s 内不重复触摸）
+  _touchLastAt = now;
+  // 1) 表情：随机挑一个候选，并避开上一次播放的表情（否则连点随机到相同表情时
+  //    setExpression 因同 index 直接返回 false → 看起来"第二次不换表情"）
+  const exprs = spec.expressions || [];
+  if (exprs.length) {
+    let emo;
+    try {
+      // 候选 → 模型真实表情名（支持标准情绪名 + 直接表情名混用），剔除与上次相同的
+      const cands = [];
+      for (const x of exprs) {
+        const nm = resolveEmotionForTouch(x);
+        if (nm && nm !== _lastTouchEmo) cands.push(nm);
+      }
+      const pool = cands.length ? cands : exprs.map((x) => resolveEmotionForTouch(x)).filter(Boolean);
+      emo = pool[Math.floor(Math.random() * pool.length)];
+    } catch (e) {
+      emo = exprs[Math.floor(Math.random() * exprs.length)];
+    }
+    if (emo && emo !== "neutral") {
+      // 关键：先清掉上一个触摸表情的参数再换（否则旧表情按钮参数残留，
+      // 新表情叠加上去 → "脸红+O形嘴"同显且看起来停滞）。
+      restoreExpressionParams();
+      _lastTouchEmo = emo;
+      _lastTouchEmoRaw = emo;
+      snapshotEmotionParams();
+      _touchEmoActive = true;
+      _applyTouchEmotion(emo);
+      // 触摸表情独立保持：到点复位默认表情（不受全局 EMOTION_HOLD_MS 影响）
+      clearTimeout(_touchEmoTimer);
+      if (TOUCH_CFG.holdMs > 0) _touchEmoTimer = setTimeout(resetEmotion, TOUCH_CFG.holdMs);
+    }
+  } else {
+    resetEmotion();  // 无表情候选 -> 复位
+  }
 }
 
 /* ---------------- Live2D 模型 ---------------- */
@@ -443,7 +687,25 @@ async function initLive2D() {
     setParam(P.mouth, mouth);
     setParam(P.breath, 0.5 + 0.5 * Math.sin(t * 1.6));
     setParam(P.bodyX, 2.5 * Math.sin(t * 0.7));
-    if (model.update) model.update(dt);
+    // 关键：必须驱动 internalModel.update（它内部会调 motionManager + expressionManager，
+    // 把动作/表情参数真正应用到模型）。model.update 只是时间累加器空壳，不驱动任何东西
+    // 那会导致表情/动作永远不生效（触摸反馈/情绪表情全无反应）。
+    try {
+      if (model.internalModel.update) model.internalModel.update(dt, dt);
+      else if (model.update) model.update(dt);
+    } catch (e) { /* 单帧异常忽略 */ }
+    // 补丁：internalModel.update 每帧尾会 loadParameters() 恢复动作更新前的参数，
+    // 把触摸表情"直接写入"的参数撤销了 → 表情会被擦掉。
+    // 解决：在 internalModel.update 之后，若触摸表情处于保持期（_touchEmoActive），
+    // 重放一次当前触摸表情（_lastTouchEmoName 指向的表情参数）——用与点击时相同的
+    // _applyTouchEmotion 直接写回 core，跨帧保持。其余情况不动，避免参数叠加。
+    try {
+      const _em = model.internalModel.motionManager.expressionManager;
+      const _core = model.internalModel.coreModel;
+      if (_touchEmoActive && _em && _core && _lastTouchEmoRaw) {
+        _applyTouchEmotion(_lastTouchEmoRaw);
+      }
+    } catch (e) { /* 忽略 */ }
     app.renderer.render(app.stage);
   };
   const rafLoop = (now) => { rafOK = true; stepAnim(now); requestAnimationFrame(rafLoop); };
@@ -508,14 +770,8 @@ async function loadModelByUrl(url, nameForDisplay) {
   resolveParams(model.internalModel.coreModel);
   positionModel();
   playIdle();
-  model.on("hit", (areas) => {
-    if (!areas || !areas.length) return;
-    try {
-      const names = (model.internalModel && model.internalModel.motionManager && model.internalModel.motionManager.definitionNames) || [];
-      const hit = ["Tap", "TapBody", "Touch", "FlickHead", "Poke", "hit"].find((n) => names.indexOf(n) >= 0);
-      if (hit) model.motion(hit);
-    } catch (e) { /* 忽略单帧点击异常 */ }
-  });
+  // 触摸反馈由前端手势判定（bindDrag 的 pointer 事件）触发，
+  // 不走模型原生 hit 事件（本项目模型无 HitAreas；避免未来模型自带时双重触发）。
   return true;
 }
 
@@ -524,20 +780,25 @@ function computeBaseScale() {
   try {
     const iw = model.internalModel.width || model.width;
     const ih = model.internalModel.height || model.height;
-    baseScale = Math.min(app.renderer.width / iw, app.renderer.height / ih) * 0.92;
+    // 注意：renderer.width/height 是「物理像素」（逻辑 × resolution），
+    // position/scale 是逻辑坐标系，必须用 screen.width/height（= CSS 逻辑尺寸）。
+    baseScale = Math.min(app.renderer.screen.width / iw, app.renderer.screen.height / ih) * 0.92;
   } catch (e) { baseScale = 1; }
 }
 function positionModel() {
   computeBaseScale();
   model.anchor.set(0.5, 0.5);
   model.scale.set(baseScale * S.scale);
-  model.position.set(app.renderer.width * S.posX, app.renderer.height * S.posY);
+  / 用 screen.width/height（逻辑 = CSS 尺寸），不是 renderer.width（物理像素）。
+  model.position.set(app.renderer.screen.width * S.posX, app.renderer.screen.height * S.posY);
 }
 
 function playIdle() {
   if (!model) return;
   try {
-    const names = model.internalModel.motionManager.definitionNames || [];
+    // 动作名在 definitions 的 key（对象），非 definitionNames 数组
+    const mm = model.internalModel.motionManager;
+    const names = Object.keys((mm && mm.definitions) || {});
     const hit = ["Idle", "idle", "idle00", "Idle_2", "main"].find((n) => names.indexOf(n) >= 0);
     if (hit) model.motion(hit);
   } catch (e) { /* 无待机则静立 */ }
@@ -573,14 +834,14 @@ async function getAudioCtx() {
   return audioCtx;
 }
 
-async function speak(text) {
+async function speak(text, lang) {
   if (!text) return;
   let resp;
   try {
     resp = await fetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, lang: REPLY_LANG }),
+      body: JSON.stringify({ text, lang: (lang || REPLY_LANG) }),
     });
   } catch (e) { addMsg("系统", "连不上 TTS：请确认 GPT-SoVITS 已启动", "sys"); return; }
   if (!resp.ok) {
@@ -1073,8 +1334,13 @@ function bindUI() {
 async function loadEmotionConfig() {
   try {
     const cfg = await fetch("/api/config").then((r) => r.json());
-    setEmotionMap(cfg.EMOTION_MAPPING || {});
-    if (typeof cfg.EMOTION_HOLD_MS === "number") window.__EMOTION_HOLD_MS = cfg.EMOTION_HOLD_MS;
+    // 各自独立 try：任何一项异常都不能吞掉其他配置的加载
+    // （此前 setEmotionMap 若抛异常，setTouchCfg 永远不执行 → 触摸反馈失效）
+    try { setEmotionMap(cfg.EMOTION_MAPPING || {}); } catch (e) { /* 忽略 */ }
+    try {
+      if (typeof cfg.EMOTION_HOLD_MS === "number") window.__EMOTION_HOLD_MS = cfg.EMOTION_HOLD_MS;
+    } catch (e) { /* 忽略 */ }
+    try { setTouchCfg(cfg); } catch (e) { /* 忽略 */ }
   } catch (e) { /* 服务器未响应 */ }
 }
 
@@ -1093,6 +1359,15 @@ async function loadConfigForm() {
     $("cfg-stt-url").value = cfg.STT_API_URL || "";
     const ss = $("cfg-stt-stream-url"); if (ss) ss.value = cfg.STT_STREAM_API_URL || "";
     $("cfg-models-dir").value = storeGet("tts_models_dir") || "";
+    // IndexTTS2 独立参考音频路径
+    const idxRef = $("cfg-index-ref");
+    if (idxRef) idxRef.value = cfg.INDEX_TTS_REF_AUDIO_PATH || "";
+    // TTS 引擎同步 + 显示/隐藏 IndexTTS 区块
+    if (ttsEngineCombo) {
+      const eng = cfg.TTS_ENGINE || "gptsovits";
+      ttsEngineCombo.setValue(eng, true);
+      toggleIndexTtsZone();
+    }
   } catch (e) { /* 服务器未响应 */ }
 }
 
@@ -1219,6 +1494,120 @@ function bindMemoryPanel() {
   });
 }
 
+/* ---------------- IndexTTS2：音色与情绪设置 ---------------- */
+let ttsEngineCombo = null;
+let indexVoiceCombo = null;
+const INDEX_EMO_NAMES = ["happy", "angry", "sad", "afraid", "disgusted", "melancholic", "surprised", "calm"];
+const INDEX_EMO_LABELS = ["开心", "生气", "悲伤", "害怕", "厌恶", "忧郁", "惊讶", "平静"];
+let INDEX_EMO_CFG = { emo: "neutral", strength: 0.6, voices: [], ref: "", lang: "ZH", url: "" };
+
+function toggleIndexTtsZone() {
+  const isIndex = ttsEngineCombo && ttsEngineCombo.wrap.dataset.value === "indextts";
+  // 引擎=indextts：隐藏 GPT-SoVITS 专属设置区，显示 IndexTTS2 按钮
+  // 引擎=gptsovits：显示 GPT-SoVITS 专属设置区，隐藏 IndexTTS2 按钮
+  $("cfg-indextts-zone").style.display = isIndex ? "none" : "";
+  $("cfg-indextts-btn-zone").style.display = isIndex ? "" : "none";
+}
+function initTtsEngineCombo() {
+  const host = $("cfg-tts-engine");
+  if (!host) return;
+  host.innerHTML = "";
+  ttsEngineCombo = createGlassSelect(["gptsovits", "indextts"], "gptsovits", false, () => toggleIndexTtsZone());
+  host.appendChild(ttsEngineCombo.wrap);
+}
+// 加载 8 个情绪滑块（0~1 步进 0.05）
+function renderEmoSliders(emo, strength) {
+  const host = $("index-emo-sliders");
+  host.innerHTML = "";
+  const vec = INDEX_EMO_LABELS.map((label, i) => {
+    const box = document.createElement("div");
+    box.className = "cfg-dir-row";
+    const lab = document.createElement("span");
+    lab.className = "cfg-label";
+    lab.style.width = "90px";
+    lab.textContent = label;
+    const input = document.createElement("input");
+    input.type = "range"; input.min = "0"; input.max = "1"; input.step = "0.05";
+    input.value = String(emo === INDEX_EMO_NAMES[i] ? strength : 0);
+    const val = document.createElement("span");
+    val.className = "cfg-emo-val"; val.textContent = input.value;
+    input.addEventListener("input", () => { val.textContent = input.value; });
+    box.appendChild(lab); box.appendChild(input); box.appendChild(val);
+    host.appendChild(box);
+    return { name: INDEX_EMO_NAMES[i], input };
+  });
+  return vec;
+}
+// 打开居中弹窗：拉 /api/config 初始化滑块 + 音色下拉 + ref
+async function openIndexModal() {
+  const modal = $("index-modal");
+  modal.classList.remove("hidden");
+  const emoHost = $("index-voice-host");
+  emoHost.innerHTML = "";
+  // 清理上一次打开遗留的下拉 DOM（挂 body 的菜单）
+  if (indexVoiceCombo && typeof indexVoiceCombo.destroy === "function") indexVoiceCombo.destroy();
+  indexVoiceCombo = createGlassSelect([], "", false);
+  emoHost.appendChild(indexVoiceCombo.wrap);
+  try {
+    const cfg = await fetch("/api/config").then((r) => r.json());
+    INDEX_EMO_CFG.emo = cfg.INDEX_TTS_EMO || "neutral";
+    INDEX_EMO_CFG.strength = Number(cfg.INDEX_TTS_EMO_STRENGTH || 0.6);
+    INDEX_EMO_CFG.ref = cfg.INDEX_TTS_REF_AUDIO_PATH || "";
+    INDEX_EMO_CFG.lang = cfg.INDEX_TTS_LANG || "ZH";
+    const v = await fetch("/api/tts_voices").then((r) => r.json());
+    INDEX_EMO_CFG.voices = v.voices || [];
+    // 音色下拉：当前独立 IndexTTS 参考音频 + 音色库所有 wav 文件名
+    const names = INDEX_EMO_CFG.voices.map((x) => x.name);
+    if (INDEX_EMO_CFG.ref) names.splice(0, 0, shortName(INDEX_EMO_CFG.ref));
+    indexVoiceCombo.setOptions(names);
+    if (INDEX_EMO_CFG.ref) indexVoiceCombo.setValue(shortName(INDEX_EMO_CFG.ref), true);
+    else if (names.length) indexVoiceCombo.setValue(names[0], true);
+  } catch (e) { /* 服务器未响应 */ }
+  renderEmoSliders(INDEX_EMO_CFG.emo, INDEX_EMO_CFG.strength);
+}
+function closeIndexModal() {
+  // 关闭面板的同时必须关闭打开中的下拉菜单（它们挂在 body 上，
+  // 否则面板隐藏后菜单仍单独悬浮在屏幕上）
+  try { closeAllMenus(); } catch (e) { /* 忽略 */ }
+  $("index-modal").classList.add("hidden");
+}
+async function saveIndexModal() {
+  // 从滑块读 8 维向量（谁非 0 就是那个情绪）
+  const inputs = Array.from(document.querySelectorAll("#index-emo-sliders input[type=range]"));
+  const vec = inputs.map((i) => parseFloat(i.value));
+  const maxI = vec.indexOf(Math.max(...vec));
+  const isNeutral = vec.every((x) => x <= 0.001);
+  const emo = isNeutral ? "neutral" : INDEX_EMO_NAMES[maxI];
+  const strength = isNeutral ? 0 : vec[maxI];
+  // 音色选中 -> 对应 wav 路径
+  const sel = indexVoiceCombo ? indexVoiceCombo.wrap.dataset.value : "";
+  const ref = (INDEX_EMO_CFG.voices.find((x) => x.name === sel) || {}).path || INDEX_EMO_CFG.ref || "";
+  const updates = {
+    INDEX_TTS_EMO: emo,
+    INDEX_TTS_EMO_STRENGTH: strength,
+    INDEX_TTS_REF_AUDIO_PATH: ref,
+  };
+  const msg = ("cfg-msg");
+  try {
+    const resp = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ updates }),
+    });
+    const data = await resp.json();
+    if (data.error) { showToast("保存失败：" + data.error); return; }
+    showToast("已保存：情绪 " + emo + " / 强度 " + strength + " / " + shortName(ref));
+    closeIndexModal();
+  } catch (e) { showToast("保存失败：连不上本地服务器"); }
+}
+function bindIndexModal() {
+  const btn = $("cfg-open-index");
+  if (btn) btn.addEventListener("click", openIndexModal);
+  $("index-modal-cancel").addEventListener("click", closeIndexModal);
+  $("index-modal-save").addEventListener("click", saveIndexModal);
+  $("index-modal").addEventListener("click", (e) => { if (e.target === $("index-modal")) closeIndexModal(); });
+}
+
 function bindConfigPanel() {
   $("cfg-open").addEventListener("click", () => {
     const p = $("cfg-panel");
@@ -1245,6 +1634,8 @@ function bindConfigPanel() {
       TTS_PROMPT_TEXT: $("cfg-tts-prompt").value,
       STT_API_URL: $("cfg-stt-url").value.trim(),
       STT_STREAM_API_URL: ($("cfg-stt-stream-url") || { value: "" }).value.trim(),
+      TTS_ENGINE: (ttsEngineCombo ? ttsEngineCombo.wrap.dataset.value : "gptsovits"),
+      INDEX_TTS_REF_AUDIO_PATH: ($("cfg-index-ref") || { value: "" }).value.trim(), 
     };
     const msg = $("cfg-msg");
     msg.textContent = "保存中…";
@@ -1327,9 +1718,16 @@ function createGlassSelect(options, selectedValue, editable, onChange) {
     closeAllMenus();
     menu.style.position = "fixed";
     const r = wrap.getBoundingClientRect();
+    // 菜单宽度 = 触发框宽度 与 最长选项宽度 的较大者，避免长文件名被裁切看不清
+    let maxW = r.width;
+    Array.from(menu.children).forEach((it) => {
+      it.style.whiteSpace = "nowrap";
+      const w = it.scrollWidth;
+      if (w > maxW) maxW = w;
+    });
     menu.style.left = r.left + "px";
     menu.style.top = (r.bottom + 4) + "px";
-    menu.style.width = r.width + "px";
+    menu.style.width = maxW + "px";
     menu.style.maxHeight = "";
     menu.classList.add("open");
   }
@@ -1340,15 +1738,23 @@ function createGlassSelect(options, selectedValue, editable, onChange) {
     if (menu.classList.contains("open")) { if (!editable) closeMenu(); }
     else openMenu();
   });
+  
+  // 摧毁：把挂到 body 的菜单 DOM 移除，避免反复创建下拉造成节点泄漏
+  function destroy() {
+    try { if (menu.parentNode) menu.parentNode.removeChild(menu); } catch (e) { /* 忽略 */ }
+  }
 
-  return { wrap, trigger, setValue, setOptions, closeMenu };
+  return { wrap, trigger, setValue, setOptions, closeMenu, destroy };
 }
 
 function closeAllMenus() {
   document.querySelectorAll(".cfg-select-menu.open").forEach((m) => m.classList.remove("open"));
 }
-document.addEventListener("click", closeAllMenus);
-window.addEventListener("scroll", closeAllMenus, true);
+// 滚动关闭菜单：捕获阶段但忽略"菜单自身滚动"（下拉内的滚动不应把自己关掉）
+window.addEventListener("scroll", (e) => {
+  if (e.target && e.target.classList && e.target.classList.contains("cfg-select-menu")) return;
+  closeAllMenus();
+});
 window.addEventListener("resize", closeAllMenus);
 
 /* LLM 模型选择（毛玻璃下拉，可手动输入） */
@@ -1569,6 +1975,8 @@ window.addEventListener("DOMContentLoaded", () => {
   initModelCombo();
   initLlmCombo();
   initLangCombo();
+  initTtsEngineCombo();
+  bindIndexModal();
   bindConfigPanel();
   bindMemoryPanel();
   bindZoom();
