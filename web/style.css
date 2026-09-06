@@ -292,6 +292,13 @@ textarea.cfg-input { resize: vertical; }
   transition: filter .2s; white-space: nowrap;
 }
 .cfg-scan-btn:hover { filter: brightness(1.05); }
+#cfg-open-index {
+  width: 100%; margin-top: 10px; padding: 9px 0; border: none; border-radius: 9px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; font-family: var(--font);
+  transition: filter .2s;
+}
+#cfg-open-index:hover { filter: brightness(1.05); }
 .cfg-models-status { font-size: 12px; margin: 8px 0 4px; min-height: 16px; color: var(--text-dim); line-height: 1.4; }
 .cfg-models-status.cfg-ok { color: var(--ok); }
 .cfg-models-status.cfg-err { color: var(--err); }
@@ -356,6 +363,7 @@ textarea.cfg-input { resize: vertical; }
 .cfg-select-menu::-webkit-scrollbar { width: 6px; }
 .cfg-select-menu::-webkit-scrollbar-thumb { background: rgba(255,150,190,.45); border-radius: 3px; }
 .cfg-select-item {
+  flex: 0 0 auto;
   padding: 6px 10px; font-size: 12px; color: var(--text);
   cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   transition: background .15s, color .15s;
@@ -529,7 +537,7 @@ textarea.cfg-input { resize: vertical; }
   background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; font-weight: 600;
 }
 .mem-confirm-ok:hover { filter: brightness(1.05); }
-#mem-body.hidden, #mem-confirm.hidden { display: none; }
+#mem-body.hidden, #mem-confirm.hidden, #index-modal.hidden { display: none; }
 
 #titlebar {
   position: fixed; top: 0; left: 0; right: 0; height: 30px; z-index: 40;
