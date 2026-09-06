@@ -102,6 +102,9 @@
     <div id="cfg-llm-model"></div>
 
     <div class="cfg-section">TTS 设置</div>
+    <label class="cfg-label" for="cfg-tts-engine">TTS 引擎</label>
+    <div id="cfg-tts-engine"></div>
+    <div id="cfg-indextts-zone">
     <label class="cfg-label" for="cfg-tts-url">GPT-SoVITS 地址</label>
     <input id="cfg-tts-url" class="cfg-input" type="text" placeholder="http://127.0.0.1:9880">
     <label class="cfg-label" for="cfg-tts-ref">参考音频路径</label>
@@ -117,7 +120,13 @@
     </div>
     <div id="cfg-models-status" class="cfg-models-status"></div>
     <div id="cfg-models-list" class="cfg-models-list"></div>
-
+    </div>
+    <div id="cfg-indextts-btn-zone">
+      <label class="cfg-label" for="cfg-index-ref">IndexTTS2 参考音频路径</label>
+      <input id="cfg-index-ref" class="cfg-input" type="text" placeholder="D:\voice_01.wav（留空=自动用音色库第一个）">
+      <button id="cfg-open-index" class="cfg-btn" type="button">音色与情绪调整</button>
+    </div>
+    
     <div class="cfg-section">STT 设置</div>
     <label class="cfg-label" for="cfg-stt-url">STT 服务地址（可只填端口号）</label>
     <input id="cfg-stt-url" class="cfg-input" type="text" placeholder="http://127.0.0.1:9988/transcribe 或 9988">
@@ -156,6 +165,22 @@
     </div>
   </div>
 
+  <!-- IndexTTS2 音色与情绪设置 -->
+  <div id="index-modal" class="mem-confirm hidden">
+    <div class="mem-confirm-box">
+      <div class="mem-confirm-title">IndexTTS2 · 音色与情绪</div>
+      <div class="cfg-section">参考音频（音色）</div>
+      <div id="index-voice-host"></div>
+      <div class="cfg-section">情绪 8 维向量</div>
+      <div id="index-emo-sliders"></div>
+      <div class="cfg-hint">保存后写回 config.py，重启程序生效</div>
+      <div class="mem-confirm-btns">
+        <button id="index-modal-cancel" class="mem-confirm-btn mem-confirm-cancel" type="button">取消</button>
+        <button id="index-modal-save" class="mem-confirm-btn mem-confirm-ok" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+  
   <!-- frameless 窗口四角缩放手柄（右上角有 ✕ 关闭键，不做手柄；其余三角可拖拽缩放） -->
   <div id="resize-handle" class="resize-handle resize-se" data-fix="nw" title="拖动调整窗口大小"></div>
   <div id="resize-handle-sw" class="resize-handle resize-sw" data-fix="ne" title="拖动调整窗口大小"></div>
