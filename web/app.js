@@ -789,7 +789,7 @@ function positionModel() {
   computeBaseScale();
   model.anchor.set(0.5, 0.5);
   model.scale.set(baseScale * S.scale);
-  / 用 screen.width/height（逻辑 = CSS 尺寸），不是 renderer.width（物理像素）。
+  // 用 screen.width/height（逻辑 = CSS 尺寸），不是 renderer.width（物理像素）。
   model.position.set(app.renderer.screen.width * S.posX, app.renderer.screen.height * S.posY);
 }
 
