@@ -11,7 +11,8 @@ from urllib.parse import urlparse, unquote, parse_qs
 
 import config
 from llm_client import LLMClient, llm_port_alive
-from tts import synthesize, detect_text_lang
+from tts import (synthesize, synthesize_indextts, detect_text_lang,
+                 emo_vector_from_config)
 from stt import STTClient, transcribe_via_api
 from memory import MemoryManager
 import chat_log
@@ -78,11 +79,18 @@ def pick_model(name: str = ""):
 
 
 def _expression_name(filename: str) -> str:
+    """把 害羞脸.exp3.json 归一成 害羞脸（去掉 .exp3 双扩展名残留）。"""
     base = os.path.splitext(filename)[0]
     return base[:-len(".exp3")] if base.lower().endswith(".exp3") else base
 
 
 def augment_model3(model3_path: str) -> bytes:
+    """把模型同目录及常用子目录下的动作/表情注入 model3.json。
+    必须写入 FileReferences.Motions/Expressions（pixi-live2d 只读这个位置，
+    顶层同名字段会被忽略 → 模型无动作、Part 可见性曲线失效）。
+    扫描：同目录 + animations/ + motions/ + expressions/ 子目录。
+    Idle 只按依据注入（模型原有或 .vtube.json 的 IdleAnimation），不硬凑效果动作。
+    """
     with open(model3_path, "rb") as f:
         data = json.loads(f.read().decode("utf-8"))
     model_dir = os.path.dirname(model3_path)
@@ -239,6 +247,7 @@ def resolve_tts_text_lang(text: str) -> str:
 
 
 def scan_tts_models():
+    """扫描 TTS_MODELS_DIR 顶层子文件夹，返回 [{name, ckpt, pth, ref_audio, prompt}]。"""
     root = config.TTS_MODELS_DIR
     if not root or not os.path.isdir(root):
         return []
@@ -357,8 +366,12 @@ def service_status() -> dict:
     except Exception:
         pass
     try:
-        # api_v2.py 无 "/" 路由（会 404 刷屏），用 /openapi.json 做健康检查
-        status["tts"] = _http_ok(f"{config.GPT_SOVITS_URL}/openapi.json")
+        # GPT-SoVITS api.py 无 "/" 路由（会 404 刷屏），用 /openapi.json 做健康检查
+        # IndexTTS2 薄 API 的 GET / 秒回。
+        if getattr(config, "TTS_ENGINE", "gptsovits") == "indextts":
+            status["tts"] = _http_ok(f"{config.INDEX_TTS_URL}/")
+        else:
+            status["tts"] = _http_ok(f"{config.GPT_SOVITS_URL}/openapi.json")
     except Exception:
         pass
     if config.STT_BACKEND == "api":
@@ -372,6 +385,7 @@ def service_status() -> dict:
 
 
 def _memory_payload() -> dict:
+    """记忆管理面板数据：{enabled, count, memories[]}。禁用时返回空列表。"""
     try:
         mem = get_memory()
         if mem is None:
@@ -382,10 +396,14 @@ def _memory_payload() -> dict:
         print(f"[记忆] 列表读取失败（静默）：{e}")
         return {"enabled": False, "count": 0, "memories": []}
 
+# 配置读取 / 写入
 EDITABLE_KEYS = (
     "LM_STUDIO_BASE_URL", "LM_MODEL", "GPT_SOVITS_URL",
     "TTS_REF_AUDIO_PATH", "TTS_PROMPT_TEXT", "STT_API_URL",
     "STT_STREAM_API_URL",
+    "TTS_ENGINE", "INDEX_TTS_URL", "INDEX_TTS_LANG",
+    "INDEX_TTS_VOICES_DIR", "INDEX_TTS_REF_AUDIO_PATH",
+    "INDEX_TTS_EMO", "INDEX_TTS_EMO_STRENGTH",
 )
 
 
@@ -405,6 +423,9 @@ def get_editable_config() -> dict:
     cfg["MEM_LLM_EXTRACT"] = bool(getattr(config, "MEM_LLM_EXTRACT", False))
     cfg["MEM_RETRIEVE_TOP_K"] = int(getattr(config, "MEM_RETRIEVE_TOP_K", 5))
     cfg["MEM_MAX_ENTRIES"] = int(getattr(config, "MEM_MAX_ENTRIES", 1500))
+    cfg["TOUCH_ENABLED"] = bool(getattr(config, "TOUCH_ENABLED", True))
+    cfg["TOUCH_HOLD_MS"] = int(getattr(config, "TOUCH_HOLD_MS", 3000))
+    cfg["TOUCH_RESPONSES"] = getattr(config, "TOUCH_RESPONSES", {})
     return cfg
 
 
@@ -561,6 +582,17 @@ class Handler(BaseHTTPRequestHandler):
                                     "dir": scan_dir or config.TTS_MODELS_DIR})
         if path == "/api/status":
             return self._send_json(service_status())
+        if path == "/api/tts_voices":   
+            # IndexTTS2 参考音频列表（前端音色下拉）：扫 config.INDEX_TTS_VOICES_DIR 下的 wav
+            d = getattr(config, "INDEX_TTS_VOICES_DIR", "")
+            voices = []
+            try:
+                for f in sorted(os.listdir(d)):
+                    if f.lower().endswith(".wav") and os.path.isfile(os.path.join(d, f)):
+                        voices.append({"name": f, "path": os.path.join(d, f)})
+            except Exception:
+                pass
+            return self._send_json({"voices": voices, "dir": d})       
         if path == "/api/config":
             return self._send_json(get_editable_config())
         if path == "/api/llm_models":
@@ -690,6 +722,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/tts":
                 data = json.loads(self._read_body().decode("utf-8"))
                 text = data.get("text", "")
+                if getattr(config, "TTS_ENGINE", "gptsovits") == "indextts":
+                    # IndexTTS2 引擎：用独立的 INDEX_TTS_REF_AUDIO_PATH（空则回落 TTS_REF_AUDIO_PATH）。
+                    # 语言优先用请求体传的（前端所选回复语言），无效才回退 config。
+                    req_lang = (data.get("lang") or "").strip().upper()
+                    lang = req_lang if req_lang else getattr(config, "INDEX_TTS_LANG", "ZH")
+                    ref = getattr(config, "INDEX_TTS_REF_AUDIO_PATH", "") or config.TTS_REF_AUDIO_PATH or ""
+                    wav = synthesize_indextts(
+                        config.INDEX_TTS_URL, text, ref,
+                        lang=lang,
+                        emo_vector=emo_vector_from_config(
+                            getattr(config, "INDEX_TTS_EMO", "neutral"),
+                            float(getattr(config, "INDEX_TTS_EMO_STRENGTH", 0.6)),
+                        ),
+                        emo_alpha=float(getattr(config, "INDEX_TTS_EMO_STRENGTH", 0.6)),
+                    )
+                    return self._send_bytes(wav, "audio/wav")          
                 lang = data.get("lang")
                 detected = detect_text_lang(text)
                 if detected in ("en", "zh"):
