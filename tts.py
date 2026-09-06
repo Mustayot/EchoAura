@@ -66,7 +66,7 @@ def synthesize(gpt_sovits_url: str, text: str,
         resp = requests.post(f"{gpt_sovits_url}/tts", json=payload, timeout=timeout)
     except requests.exceptions.ConnectionError as e:
         raise RuntimeError(
-            f"连不上 GPT-SoVITS（{gpt_sovits_url}）。请确认已运行 python api_v2.py -p 9880"
+            f"连不上 GPT-SoVITS（{gpt_sovits_url}）。请确认已运行 python api.py -p 9880"
         ) from e
 
     if resp.status_code != 200:
@@ -112,7 +112,7 @@ def synthesize_indextts(base_url: str, text: str, ref_audio_path: str,
         resp = requests.post(f"{base_url}/tts", json=payload, timeout=timeout)
     except requests.exceptions.ConnectionError as e:
         raise RuntimeError(
-            f"连不上 IndexTTS2（{base_url}）。请确认已运行 uv run api_server.py（D:\\AI\\IndexTTS2）"
+            f"连不上 IndexTTS2（{base_url}）。请确认已运行 uv run api.py"
         ) from e
 
     if resp.status_code != 200:
