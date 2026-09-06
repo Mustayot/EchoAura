@@ -28,6 +28,20 @@ STREAM_TTS_CHUNK_SIZE = 0
 # 这里填你自己 GPT-SoVITS 的音色模型所在目录
 TTS_MODELS_DIR = r"GPTsoVits"
 
+# TTS 引擎："gptsovits"（默认端口 9880）或 "indextts"（端口 9881）
+TTS_ENGINE = "gptsovits"
+INDEX_TTS_URL = "http://127.0.0.1:9881"
+INDEX_TTS_LANG = "ZH"
+# IndexTTS2 参考音频目录（前端下拉扫 wav）；必须指向有 wav 的真实目录
+INDEX_TTS_VOICES_DIR = r"D:\AI\IndexTTS2\examples"
+# 空 = 用 INDEX_TTS_VOICES_DIR 下第一个 wav
+INDEX_TTS_REF_AUDIO_PATH = "D:/AI/IndexTTS2/examples/voice_01.wav"
+# happy/angry/sad/afraid/disgusted/melancholic/surprised/calm/neutral
+INDEX_TTS_EMO = "neutral"
+# 情绪强度 0~1（仅非 neutral 时生效）
+INDEX_TTS_EMO_STRENGTH = 0
+
+# "api" = 外部本地 STT 服务
 STT_BACKEND = "api"
 STT_API_URL = "http://127.0.0.1:9988/transcribe"
 STT_STREAM_API_URL = "http://127.0.0.1:9989/transcribe_stream"
@@ -89,6 +103,28 @@ CHAT_LOG_TOP_K = 50
 CHAT_LOG_INJECT = True
 # 记录里"用户"的显示名（角色名自动取 PERSONA_NAME）
 CHAT_USER_NAME = "主人"
+# 点击模型部位触发表情：True = 点头部/身体换表情（不影响拖动/缩放）
+TOUCH_ENABLED = True
+# 部位划分：前端按模型包围盒比例切"头部"（上方约 28%）与"身体"（其余）。
+#   每个部位：expressions = 表情候选列表。可混用两种写法：
+#     a) 标准情绪名（happy/sad/angry/surprised）→ 经 EMOTION_MAPPING 映射到模型表情
+#     b) 模型真实表情名（脸红/眯眯眼脸/O形嘴…）→ 直接用（需模型存在该表情才生效）
+# 表情保持时间(ms)：0 = 保持到下一次表情更新（对话/点击覆盖）；>0 = 到时自动复位默认表情
+TOUCH_HOLD_MS = 3000
+TOUCH_RESPONSES = {
+    "head": {
+        "expressions": [
+            "surprised", "happy",          # 标准情绪（跨模型通用）
+            "眯眯眼脸", "瞳孔缩小", "害羞脸", "脸红",   # 阿库露直接表情名（无则跳过）
+        ],
+    },
+    "body": {
+        "expressions": [
+            "happy", "surprised",
+            "脸红", "O形嘴", "眯眯眼脸", "瞳孔缩小", "呆呆脸", "脸黑",
+        ],
+    },
+}
 
 MODEL_PATH = r"models"
 MODEL_NAME = "阿库露"
